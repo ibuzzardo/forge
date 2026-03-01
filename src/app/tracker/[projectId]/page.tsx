@@ -2,12 +2,13 @@ import { notFound } from "next/navigation";
 import { TrackerDashboard } from "@/components/build-tracker/tracker-dashboard";
 import { inMemoryStore } from "@/lib/store/in-memory-store";
 
-interface TrackerPageProps {
-  params: { projectId: string };
-}
+type TrackerPageProps = {
+  params: Promise<{ projectId: string }>;
+};
 
-export default function TrackerPage({ params }: TrackerPageProps): JSX.Element {
-  const project = inMemoryStore.getProject(params.projectId);
+export default async function TrackerPage(props: TrackerPageProps) {
+  const { projectId } = await props.params;
+  const project = inMemoryStore.getProject(projectId);
   if (!project) {
     notFound();
   }

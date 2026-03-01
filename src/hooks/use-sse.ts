@@ -70,7 +70,7 @@ export function useSse(projectId: string, onEvent: (event: PipelineEvent) => voi
         return;
       }
 
-      source.onmessage = (message: MessageEvent<string>): void => {
+      const handleSseMessage = (message: MessageEvent<string>): void => {
         try {
           const parsed = JSON.parse(message.data) as PipelineEvent;
 
@@ -89,6 +89,13 @@ export function useSse(projectId: string, onEvent: (event: PipelineEvent) => voi
           // Ignore malformed payloads and keep stream alive.
         }
       };
+
+      // Listen for both unnamed (onmessage) and named events
+      source.onmessage = handleSseMessage;
+      const eventTypes = ["snapshot", "stage", "log", "stats", "heartbeat"];
+      eventTypes.forEach((type) => {
+        source!.addEventListener(type, handleSseMessage as EventListener);
+      });
 
       source.onerror = (): void => {
         source?.close();

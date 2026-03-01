@@ -2,13 +2,12 @@ import { apiSuccess } from "@/lib/api/response";
 import { internalServerErrorResponse, notFoundResponse } from "@/lib/api/errors";
 import { inMemoryStore } from "@/lib/store/in-memory-store";
 
-interface Params {
-  params: { projectId: string };
-}
+type Params = { params: Promise<{ projectId: string }> };
 
-export async function GET(_: Request, { params }: Params) {
+export async function GET(_: Request, props: Params) {
   try {
-    const project = inMemoryStore.getProject(params.projectId);
+    const { projectId } = await props.params;
+    const project = inMemoryStore.getProject(projectId);
     if (!project) {
       return notFoundResponse("Project not found");
     }

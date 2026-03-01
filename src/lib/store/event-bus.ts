@@ -50,4 +50,9 @@ class EventBus {
   }
 }
 
-export const eventBus = new EventBus();
+// Use globalThis to ensure singleton across Next.js route bundles
+const globalForEventBus = globalThis as unknown as { __forgeEventBus?: EventBus };
+if (!globalForEventBus.__forgeEventBus) {
+  globalForEventBus.__forgeEventBus = new EventBus();
+}
+export const eventBus = globalForEventBus.__forgeEventBus;

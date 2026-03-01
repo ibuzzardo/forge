@@ -5,28 +5,27 @@ import { startPipelineSchema } from "@/lib/validation/project-brief-schema";
 import { inMemoryStore } from "@/lib/store/in-memory-store";
 import { startPipeline } from "@/lib/pipeline/simulation-engine";
 
-interface Params {
-  params: { projectId: string };
-}
+type Params = { params: Promise<{ projectId: string }> };
 
-export async function POST(request: NextRequest, { params }: Params) {
+export async function POST(request: NextRequest, props: Params) {
   try {
+    const { projectId } = await props.params;
     const body = await request.json();
     const parsed = startPipelineSchema.safeParse(body);
     if (!parsed.success) {
       return validationErrorResponse(parsed.error);
     }
 
-    if (parsed.data.projectId !== params.projectId) {
+    if (parsed.data.projectId !== projectId) {
       return conflictResponse("projectId in body does not match route param");
     }
 
-    const project = inMemoryStore.getProject(params.projectId);
+    const project = inMemoryStore.getProject(projectId);
     if (!project) {
       return notFoundResponse("Project not found");
     }
 
-    const result = await startPipeline(params.projectId);
+    const result = await startPipeline(projectId);
     if (!result.started) {
       return conflictResponse(result.reason ?? "Unable to start pipeline");
     }

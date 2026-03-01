@@ -70,4 +70,9 @@ class InMemoryStore {
   }
 }
 
-export const inMemoryStore = new InMemoryStore();
+// Use globalThis to ensure singleton across Next.js route bundles
+const globalForStore = globalThis as unknown as { __forgeInMemoryStore?: InMemoryStore };
+if (!globalForStore.__forgeInMemoryStore) {
+  globalForStore.__forgeInMemoryStore = new InMemoryStore();
+}
+export const inMemoryStore = globalForStore.__forgeInMemoryStore;

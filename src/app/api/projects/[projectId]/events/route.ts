@@ -2,17 +2,16 @@ import { eventBus } from "@/lib/store/event-bus";
 import { inMemoryStore } from "@/lib/store/in-memory-store";
 import type { PipelineEvent } from "@/lib/types/domain";
 
-interface Params {
-  params: { projectId: string };
-}
+type Params = { params: Promise<{ projectId: string }> };
 
 function encodeSse(event: PipelineEvent): string {
-  return `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+  return `id: ${event.id}\ndata: ${JSON.stringify(event)}\n\n`;
 }
 
-export async function GET(request: Request, { params }: Params): Promise<Response> {
+export async function GET(request: Request, props: Params): Promise<Response> {
   try {
-    const project = inMemoryStore.getProject(params.projectId);
+    const { projectId } = await props.params;
+    const project = inMemoryStore.getProject(projectId);
     if (!project) {
       return new Response(JSON.stringify({ success: false, error: { code: "NOT_FOUND", message: "Project not found" } }), {
         status: 404,
@@ -27,17 +26,17 @@ export async function GET(request: Request, { params }: Params): Promise<Respons
       start(controller) {
         const encoder = new TextEncoder();
 
-        const replay = eventBus.replayFrom(params.projectId, parsedLastId);
+        const replay = eventBus.replayFrom(projectId, parsedLastId);
         replay.forEach((event) => controller.enqueue(encoder.encode(encodeSse(event))));
 
-        const unsubscribe = eventBus.subscribe(params.projectId, (event) => {
+        const unsubscribe = eventBus.subscribe(projectId, (event) => {
           controller.enqueue(encoder.encode(encodeSse(event)));
         });
 
         const heartbeat = setInterval(() => {
-          const event = eventBus.publish(params.projectId, {
+          const event = eventBus.publish(projectId, {
             type: "heartbeat",
-            projectId: params.projectId,
+            projectId: projectId,
             timestamp: new Date().toISOString(),
             payload: { ok: true }
           });
