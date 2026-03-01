@@ -6,49 +6,110 @@ import type { PipelineEvent } from "@/lib/types/domain";
 const INITIAL_RETRY_MS = 1000;
 const MAX_RETRY_MS = 5000;
 
-function getEventIdFromPayload(event: PipelineEvent): string | null {
-  if (typeof event !== "object" || event === null) {
-    return null;
-  }
-
-  const candidate = event as { id?: unknown };
-  return typeof candidate.id === "string" && candidate.id.length > 0 ? candidate.id : null;
+export interface SseHookError {
+  kind: "parse" | "connection";
+  status: number;
+  message: string;
+  projectId: string;
+  lastEventId?: string;
+  rawData?: string;
+  cause?: unknown;
 }
 
-export function useSse(projectId: string, onEvent: (event: PipelineEvent) => void): void {
+interface EventWithOptionalId {
+  id?: string | number;
+  eventId?: string | number;
+  payload?: unknown;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function toStringId(value: unknown): string | undefined {
+  if (typeof value === "string" && value.length > 0) {
+    return value;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+
+  return undefined;
+}
+
+function extractEventId(event: unknown): string | undefined {
+  if (!isRecord(event)) {
+    return undefined;
+  }
+
+  const root = event as EventWithOptionalId;
+  const rootId = toStringId(root.id) ?? toStringId(root.eventId);
+  if (rootId) {
+    return rootId;
+  }
+
+  if (!isRecord(root.payload)) {
+    return undefined;
+  }
+
+  return toStringId(root.payload.id) ?? toStringId(root.payload.eventId);
+}
+
+function buildEventsUrl(projectId: string, lastEventId?: string): string {
+  const url = new URL(`/api/projects/${projectId}/events`, window.location.origin);
+
+  if (lastEventId) {
+    // Replay invariant: carry forward the most recently processed event id.
+    url.searchParams.set("lastEventId", lastEventId);
+  }
+
+  return `${url.pathname}${url.search}`;
+}
+
+export function useSse(
+  projectId: string,
+  onEvent: (event: PipelineEvent) => void,
+  onError?: (error: SseHookError) => void
+): void {
   const retryRef = useRef<number>(INITIAL_RETRY_MS);
-  const lastEventIdRef = useRef<string | null>(null);
-  const onEventRef = useRef<(event: PipelineEvent) => void>(onEvent);
+  const lastEventIdRef = useRef<string | undefined>(undefined);
 
   useEffect((): void => {
-    onEventRef.current = onEvent;
-  }, [onEvent]);
+    retryRef.current = INITIAL_RETRY_MS;
+    lastEventIdRef.current = undefined;
+  }, [projectId]);
 
-  useEffect((): (() => void) => {
+  useEffect(() => {
     let source: EventSource | null = null;
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
 
-    retryRef.current = INITIAL_RETRY_MS;
-    lastEventIdRef.current = null;
-
-    const clearReconnect = (): void => {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-        timeoutId = null;
+    const reportError = (error: SseHookError): void => {
+      if (onError) {
+        onError(error);
+        return;
       }
+
+      console.error(`[useSse] ${error.message}`, {
+        projectId: error.projectId,
+        status: error.status,
+        kind: error.kind,
+        lastEventId: error.lastEventId,
+        cause: error.cause
+      });
     };
 
-    const buildStreamUrl = (): string => {
-      const params = new URLSearchParams();
-      if (lastEventIdRef.current) {
-        params.set("lastEventId", lastEventIdRef.current);
+    const clearConnection = (): void => {
+      if (source) {
+        source.close();
+        source = null;
       }
 
-      const query = params.toString();
-      return query.length > 0
-        ? `/api/projects/${projectId}/events?${query}`
-        : `/api/projects/${projectId}/events`;
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = undefined;
+      }
     };
 
     const connect = (): void => {
@@ -56,52 +117,54 @@ export function useSse(projectId: string, onEvent: (event: PipelineEvent) => voi
         return;
       }
 
-      clearReconnect();
-      source?.close();
-
-      try {
-        source = new EventSource(buildStreamUrl());
-      } catch (error) {
-        const delay = retryRef.current;
-        timeoutId = setTimeout((): void => {
-          retryRef.current = Math.min(MAX_RETRY_MS, delay * 2);
-          connect();
-        }, delay);
-        return;
-      }
+      source = new EventSource(buildEventsUrl(projectId, lastEventIdRef.current));
 
       source.onmessage = (message: MessageEvent<string>): void => {
         try {
           const parsed = JSON.parse(message.data) as PipelineEvent;
+          const fallbackId = extractEventId(parsed);
+          const resolvedId = message.lastEventId || fallbackId;
 
-          if (typeof message.lastEventId === "string" && message.lastEventId.length > 0) {
-            lastEventIdRef.current = message.lastEventId;
-          } else {
-            const parsedEventId = getEventIdFromPayload(parsed);
-            if (parsedEventId) {
-              lastEventIdRef.current = parsedEventId;
-            }
+          if (resolvedId) {
+            lastEventIdRef.current = resolvedId;
           }
 
-          onEventRef.current(parsed);
+          onEvent(parsed);
           retryRef.current = INITIAL_RETRY_MS;
-        } catch {
-          // Ignore malformed payloads and keep stream alive.
+        } catch (cause: unknown) {
+          reportError({
+            kind: "parse",
+            status: 400,
+            message: "Failed to parse SSE payload as JSON.",
+            projectId,
+            lastEventId: lastEventIdRef.current,
+            rawData: message.data,
+            cause
+          });
         }
       };
 
       source.onerror = (): void => {
-        source?.close();
+        clearConnection();
 
-        const delay = retryRef.current;
+        if (disposed) {
+          return;
+        }
+
+        const retryInMs = retryRef.current;
+
+        reportError({
+          kind: "connection",
+          status: 503,
+          message: `SSE connection dropped. Retrying in ${retryInMs}ms.`,
+          projectId,
+          lastEventId: lastEventIdRef.current
+        });
+
         timeoutId = setTimeout((): void => {
-          if (disposed) {
-            return;
-          }
-
-          retryRef.current = Math.min(MAX_RETRY_MS, delay * 2);
+          retryRef.current = Math.min(MAX_RETRY_MS, retryRef.current * 2);
           connect();
-        }, delay);
+        }, retryInMs);
       };
     };
 
@@ -109,8 +172,7 @@ export function useSse(projectId: string, onEvent: (event: PipelineEvent) => voi
 
     return (): void => {
       disposed = true;
-      clearReconnect();
-      source?.close();
+      clearConnection();
     };
-  }, [projectId]);
+  }, [onEvent, onError, projectId]);
 }
