@@ -72,3 +72,7 @@ Defined in `.env.example`:
 ## Persistence Notes
 
 Data is in-memory only and resets on process restart. For local reset, restart the dev server.
+
+## License
+
+MIT — see [LICENSE](LICENSE)
